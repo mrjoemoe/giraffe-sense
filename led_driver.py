@@ -23,6 +23,7 @@ import time
 from collections import deque
 from machine import Pin, PWM
 import math
+from pubsub import EventBus
 
 
 # led = Pin(4, Pin.OUT)  # D2 = GPIO2
@@ -33,7 +34,7 @@ led.freq(1000)  # Set PWM frequency (Hz)
 RSSI_MIN = -100
 RSSI_MAX = -20
 ATTENTUATION = 4
-K_CONST = 1 / (RSSI_MAX - RSSI_MIN)
+# K_CONST = 1 / (RSSI_MAX - RSSI_MIN)
 
 
 signal_queues = {}
@@ -52,55 +53,60 @@ def signal_strength_to_normalized(rssi):
 
 # should probably make a generator
 def get_signal_strength():
-    devices = {}
+    device_strength_dB = {}
+    device_strength_normalized = {}
     if signal_queues:
         for device, values in signal_queues.items():
             if len(values) > 0:
-                devices[device] = sum(values) / len(values)
-                print(f"avg rssi = {devices[device]}")
-                normalized = signal_strength_to_normalized(devices[device])
-                print(f"normalized rssi = {normalized}")
-                return normalized
+                device_strength_dB[device] = sum(values) / len(values)
+                print(f"'{device}' avg rssi = {device_strength_dB[device]}")
+                device_strength_normalized[device] = signal_strength_to_normalized(device_strength_dB[device])
+                print(f"'{device}' normalized rssi = {device_strength_normalized[device]}")
+        device_average = sum(device_strength_normalized.values()) / len(device_strength_normalized)
+        return device_average
     else:
         return RSSI_MIN
 
 
 def blink_loop():
-    """ Main loop - run continually with updates to signal_strength
+    """ Translate dB values in queues to duty cycle
     """
 
     while True:
 
-        strength = get_signal_strength()
+        strength = get_signal_strength()  # value between 0 and 1
         # rssi_bound = min(max(signal_string, RSSI_MIN), RSSI_MAX)
         # strength = (100 - (rssi_bound * -1)) * K_CONST * (1 / ATTENTUATION)
-        strength_adj = strength * K_CONST * (1 / ATTENTUATION)
-        strength_adj = strength * (1 / ATTENTUATION)
-        max_duty = max(1, int(1024 * strength_adj))
-        duty_jumps = max(1, int(10 * strength_adj))
-        delay = 0.002 / max(strength_adj, 0.01)
+        # s_atten = strength * K_CONST * (1 / ATTENTUATION)
+        max_duty = strength * (1 / ATTENTUATION)  # leds are too bright so attenuate
+
+        # convert to duty cycle signals
+        duty_int = max(1, int(1024 * max_duty))
+        duty_jumps = max(1, int(10 * max_duty))
+
+        # our duty_int changes so we need to adjust the duty_change_delay between iterations
+        # for the pulse to be consistent
+        duty_change_delay = 0.002 / max(max_duty, 0.01)
 
         print(f"strength: {strength}")
-        print(f"strength_adj: {strength_adj}")
+        print(f"max_duty: {max_duty}")
 
-        # led.duty(max_duty)
-        # time.sleep(1)
 
         # Fade in
-        for duty in range(0, max_duty, 1):  # 0 to 1023
+        for duty in range(0, duty_int, 1):  # 0 to 1023
             led.duty(duty)
-            time.sleep(delay)
+            time.sleep(duty_change_delay)
 
         time.sleep(1.5)
 
         # Fade out
-        for duty in range(max_duty -1, -1, -1 * 1):
+        for duty in range(duty_int -1, -1, -1 * 1):
             led.duty(duty)
-            time.sleep(delay)
+            time.sleep(duty_change_delay)
 
 
 def update_queues(folder="signals", last_iteration=-1):
-    """ 
+    """ Pull data from files - add to signal queues
     """
     
     try:
@@ -109,17 +115,18 @@ def update_queues(folder="signals", last_iteration=-1):
     except OSError:
         current_iteration = -1
 
-    if current_iteration == last_iteration:
-        return current_iteration
+    # # no new data - exit early
+    # if current_iteration == last_iteration:
+    #     return current_iteration
 
-    # 2. Scan folder and process signal files
+    # Scan folder and process signal files - append to queues
     for fname in os.listdir(folder):
 
         # skip iteration file
         if fname == "iteration":
             continue
 
-        # 4. Add to signal queue
+        # Add to signal queue
         if fname not in signal_queues.keys():
             signal_queues[fname] = deque((), 5)
 
@@ -130,11 +137,18 @@ def update_queues(folder="signals", last_iteration=-1):
         iteration = int(iteration)
         write_time = int(write_time)
         signal_dB = int(signal_dB)
+        if int(signal_dB) != -110:
+            signal_dB = max(min(signal_dB, RSSI_MAX), RSSI_MIN)
 
-        # if we miss reading a network signal - assume lost - report min value
-        if iteration - current_iteration > 2:
-            signal_queues[fname].append(RSSI_MIN)
-            continue
+        # Step 3: Prepare new line and overwrite file with min - in case we drop
+        write_string = f"{iteration + 1},{time.time()},{RSSI_MIN - 10}\n"
+        with open(fpath, "w") as f:
+            f.write(write_string)
+
+        # # if we miss reading a network signal - assume lost - report min value
+        # if iteration - current_iteration > 2:
+        #     signal_queues[fname].append(RSSI_MIN)
+        #     continue
 
         signal_queues[fname].append(signal_dB)
 
@@ -142,12 +156,21 @@ def update_queues(folder="signals", last_iteration=-1):
     for k, q in signal_queues.items():
         print(f"{k}: recent dBs: {list(q)}")
 
-    return current_iteration
+    return current_iteration + 1
 
 
-def signals_loop(interval=3):
+def led_loop(bus, interval=3):
+    """ LED Loop
+
+    Pull latest signal strengths from files - put in queue
+
+    We update queues independent of signal reads in case we miss reading a signal
+    """
     current_iteration = -1
+    test_iter = -1
     while True:
+        test_iter += 1
+        bus.publish("test_update", test_iter)
         start = time.ticks_ms()  # Start time in ms
         current_iteration = update_queues(last_iteration=current_iteration)
         elapsed = time.ticks_diff(time.ticks_ms(), start) / 1000  # In seconds

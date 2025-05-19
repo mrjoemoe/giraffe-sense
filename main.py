@@ -5,17 +5,18 @@ import time
 
 
 # internal
-from led_driver import signals_loop, blink_loop
-from giraffe_net import configure_network, wifi_scan_loop
-
+from led_driver import led_loop, blink_loop
+from giraffe_net import configure_network, scan_loop
+from pubsub import EventBus
 
 SIGNALS_FOLDER = "signals"
-INTERVAL_S = 3
+INTERVAL_S = 8
 
 
 
-def initialize(folder="signals"):
-    """ Set up device folders
+def device_setup(folder="signals"):
+    """ Set up device folders.
+    currently just 1 folder for devices called 'signals' to track device signal strength
     """
     def _delete_folder_recursive(path):
         for entry in os.listdir(path):
@@ -34,8 +35,31 @@ def initialize(folder="signals"):
 
     os.mkdir(folder)
 
-initialize(folder=SIGNALS_FOLDER)
+
+# create folders
+device_setup(folder=SIGNALS_FOLDER)
+
+# setup device network
 configure_network()
-_thread.start_new_thread(wifi_scan_loop, (SIGNALS_FOLDER, INTERVAL_S))
-_thread.start_new_thread(signals_loop, (INTERVAL_S,))
+
+# start wifi scan loop - this loop measure signal strength of other devices
+# dumps data to file
+_thread.start_new_thread(scan_loop, (SIGNALS_FOLDER, INTERVAL_S - 1))
+
+
+bus = EventBus()
+
+
+# loop to read from files - append data to queues
+_thread.start_new_thread(led_loop, (bus, INTERVAL_S))
+
+def test_update(rssi):
+    print("Received new test update:", rssi)
+
+bus.subscribe("test_update", test_update)
+
+# main loop to pulse the LED
 blink_loop()
+
+
+
