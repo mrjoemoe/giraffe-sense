@@ -9,9 +9,15 @@ from led_driver import led_loop, blink_loop
 from giraffe_net import configure_network, scan_loop
 from pubsub import EventBus
 
+
 SIGNALS_FOLDER = "signals"
 INTERVAL_S = 8
 
+# UNCOMMENT FOR NEOPIXEL LEDS
+# from neopixel_driver import rainbow_fade, fade_led, crossfade
+# rainbow_fade(delay=0.02)
+# fade_led()
+# crossfade(color=(125,22,150))
 
 
 def device_setup(folder="signals"):
@@ -42,13 +48,14 @@ device_setup(folder=SIGNALS_FOLDER)
 # setup device network
 configure_network()
 
-# start wifi scan loop - this loop measure signal strength of other devices
-# dumps data to file
-_thread.start_new_thread(scan_loop, (SIGNALS_FOLDER, INTERVAL_S - 1))
+# initial scan - find networks
 
 
 bus = EventBus()
 
+# start wifi scan loop - this loop measure signal strength of other devices
+# dumps data to file
+_thread.start_new_thread(scan_loop, (SIGNALS_FOLDER, INTERVAL_S - 1))
 
 # loop to read from files - append data to queues
 _thread.start_new_thread(led_loop, (bus, INTERVAL_S))
@@ -60,6 +67,3 @@ bus.subscribe("test_update", test_update)
 
 # main loop to pulse the LED
 blink_loop()
-
-
-
